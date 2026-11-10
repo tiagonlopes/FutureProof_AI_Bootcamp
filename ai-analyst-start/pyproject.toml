@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "ai-analyst"
+version = "0.1.0"
+description = "An AI data analyst that runs inside Claude Code, on Beam's data"
+authors = ["Future Proof Data Science"]
+readme = "README.md"
+packages = [{ include = "helpers" }]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.12"
+pandas = "^2.0.0"
+matplotlib = "^3.7.0"
+pyyaml = "^6.0.0"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.6.5"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
