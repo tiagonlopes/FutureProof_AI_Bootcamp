@@ -5,5 +5,3 @@ __pycache__/
 .env
 .mcp.json
 .ruff_cache/
-outputs/*
-!outputs/.gitkeep
