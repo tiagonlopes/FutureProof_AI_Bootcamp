@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "postgres": {
+      "command": "poetry",
+      "args": ["-C", "/Users/tiagolopes/Library/CloudStorage/OneDrive-Personal/Courses/FutureProofs/AI_Bootcamp/postgres-mcp-server/postgres-mcp-server", "run", "python", "postgres-mcp-server/main.py"]
+    }
+  }
+}
