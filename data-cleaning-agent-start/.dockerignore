@@ -1,0 +1,13 @@
+.git
+.env
+.venv
+venv
+__pycache__
+*.pyc
+logs
+.claude
+.idea
+.vscode
+Dockerfile
+docker-compose.yml
+data
