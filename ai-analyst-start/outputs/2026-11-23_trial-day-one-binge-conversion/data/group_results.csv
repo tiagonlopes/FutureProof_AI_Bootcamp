@@ -1,0 +1,9 @@
+group,trials,converted,rate,ci_low,ci_high,window
+Binge then quiet,107,27,0.2523,0.1796,0.3422,first 3 days
+Binge and keep going,145,88,0.6069,0.5256,0.6827,first 3 days
+Steady,670,505,0.7537,0.7197,0.7848,first 3 days
+"Low start, quiet",288,41,0.1424,0.1067,0.1874,first 3 days
+Binge then quiet,50,5,0.1,0.0435,0.2136,"first 7 days, trials open on day 7"
+Binge and keep going,159,110,0.6918,0.6162,0.7584,"first 7 days, trials open on day 7"
+Steady,589,512,0.8693,0.8396,0.8941,"first 7 days, trials open on day 7"
+"Low start, quiet",272,37,0.136,0.1003,0.1819,"first 7 days, trials open on day 7"

@@ -1,0 +1,115 @@
+table: sessions
+description: >
+  One row per user session. This is the engagement table: active users, session
+  counts, time spent and activity mix. A user is active in a period if they have
+  at least one session with session_date in that period. This table is very
+  large, so every query against it must be an aggregate (COUNT, COUNT DISTINCT,
+  SUM, AVG, MIN, MAX) grouped by a period or a dimension. Never SELECT raw
+  session rows, never SELECT * and never run it without an aggregate, even with
+  a LIMIT. To inspect the data, aggregate it: counts per day or month, averages
+  per activity_type, distinct users per period. Filter on session_date first so
+  the aggregate scans only the period it needs.
+
+fields:
+  - name: session_id
+    type: integer
+    description: Unique identifier for the session. Primary key.
+    role: key
+
+  - name: user_id
+    type: integer
+    description: The user who had the session. Joins to users.user_id.
+    role: key
+
+  - name: session_date
+    type: timestamp
+    description: Date and time when the session occurred. This is the field that places a session, and its user's activity, in a period.
+    role: dimension
+
+  - name: duration_minutes
+    type: integer
+    description: Duration of the session in whole minutes. Sum it for total time spent; average it for typical session length.
+    role: measure
+
+  - name: activity_type
+    type: text
+    description: The main activity performed during the session. One of browse, listen or read. One value per session; a mixed session is labelled by its main activity.
+    role: dimension
+
+measures:
+  - name: total_sessions
+    formula: COUNT(session_id) FILTER (WHERE session_date >= period_start AND session_date < period_end)
+    description: Sessions in the period.
+
+  - name: active_users
+    formula: COUNT(DISTINCT user_id) FILTER (WHERE session_date >= period_start AND session_date < period_end)
+    description: Distinct users with at least one session in the period. A one-day period gives DAU, a week WAU, a month MAU.
+
+  - name: total_minutes
+    formula: SUM(duration_minutes) FILTER (WHERE session_date >= period_start AND session_date < period_end)
+    description: Total minutes spent across all sessions in the period.
+
+  - name: avg_session_minutes
+    formula: AVG(duration_minutes) FILTER (WHERE session_date >= period_start AND session_date < period_end)
+    description: Average session length in minutes for the period.
+
+  - name: minutes_per_active_user
+    formula: total_minutes / NULLIF(active_users, 0)
+    description: Average minutes per active user in the period.
+
+  - name: sessions_per_active_user
+    formula: total_sessions::numeric / NULLIF(active_users, 0)
+    description: Average sessions per active user in the period.
+
+derived_dimensions:
+  - name: session_month
+    description: Calendar month of the session.
+    formula: DATE_TRUNC('month', session_date)::date
+
+  - name: days_since_signup
+    description: Whole days between the user's signup and the session. Needs a join to users. Day 0 is the signup day; used for retention curves.
+    formula: session_date::date - users.signup_date::date
+
+golden_queries:
+  - name: monthly_active_users_and_engagement
+    description: Monthly active users, sessions and minutes per active user
+    sql: |
+      SELECT DATE_TRUNC('month', session_date)::date AS month,
+             COUNT(DISTINCT user_id) AS active_users,
+             COUNT(*) AS sessions,
+             ROUND(SUM(duration_minutes)::numeric / COUNT(DISTINCT user_id), 1) AS minutes_per_active_user,
+             ROUND(AVG(duration_minutes), 1) AS avg_session_minutes
+      FROM sessions
+      GROUP BY 1
+      ORDER BY 1;
+
+  - name: activity_mix_by_month
+    description: Share of each month's minutes spent on each activity type
+    sql: |
+      SELECT DATE_TRUNC('month', session_date)::date AS month,
+             activity_type,
+             SUM(duration_minutes) AS minutes,
+             ROUND(SUM(duration_minutes)::numeric
+                   / SUM(SUM(duration_minutes)) OVER (PARTITION BY DATE_TRUNC('month', session_date)), 4) AS share_of_minutes
+      FROM sessions
+      GROUP BY 1, 2
+      ORDER BY 1, 2;
+
+  - name: day_7_retention_by_signup_month
+    description: Share of each signup cohort with a session between day 1 and day 7 after signup
+    sql: |
+      SELECT DATE_TRUNC('month', u.signup_date)::date AS signup_month,
+             COUNT(*) AS users,
+             COUNT(*) FILTER (WHERE EXISTS (
+               SELECT 1 FROM sessions s
+               WHERE s.user_id = u.user_id
+                 AND s.session_date::date - u.signup_date::date BETWEEN 1 AND 7
+             )) AS retained_d7,
+             ROUND(COUNT(*) FILTER (WHERE EXISTS (
+               SELECT 1 FROM sessions s
+               WHERE s.user_id = u.user_id
+                 AND s.session_date::date - u.signup_date::date BETWEEN 1 AND 7
+             ))::numeric / COUNT(*), 4) AS d7_retention
+      FROM users u
+      GROUP BY 1
+      ORDER BY 1;

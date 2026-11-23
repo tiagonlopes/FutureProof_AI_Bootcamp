@@ -1,0 +1,69 @@
+table: users
+description: >
+  One row per registered user. This is the central table: sessions, subscriptions
+  and trials all join to it on user_id. country and device_type are fixed at
+  signup and never updated, so they describe how a user arrived, not where they
+  are or what they use today.
+
+fields:
+  - name: user_id
+    type: integer
+    description: Unique identifier for the user. Primary key, and the join key for sessions, subscriptions and trials.
+    role: key
+
+  - name: signup_date
+    type: timestamp
+    description: Date and time when the user signed up. Use it for signup counts and to build signup cohorts. Stored without a time zone.
+    role: dimension
+
+  - name: country
+    type: text
+    description: User's country, based on IP geolocation during signup. Captured once and never updated, so it is the signup country, not the current one.
+    role: dimension
+
+  - name: device_type
+    type: text
+    description: The type of device used for signing up. One of iOS, Android or Web. Signup device only; there is no field for the device used in later sessions.
+    role: dimension
+
+measures:
+  - name: total_users
+    formula: COUNT(DISTINCT user_id)
+    description: Distinct users.
+
+  - name: new_users
+    formula: COUNT(DISTINCT user_id) FILTER (WHERE signup_date >= period_start AND signup_date < period_end)
+    description: Users who signed up in the period.
+
+derived_dimensions:
+  - name: signup_month
+    description: Calendar month of signup. The standard cohort key for retention and conversion analyses.
+    formula: DATE_TRUNC('month', signup_date)::date
+
+golden_queries:
+  - name: monthly_signups_by_device
+    description: New users per month, split by signup device
+    sql: |
+      SELECT DATE_TRUNC('month', signup_date)::date AS signup_month,
+             device_type,
+             COUNT(*) AS new_users
+      FROM users
+      GROUP BY 1, 2
+      ORDER BY 1, 2;
+
+  - name: paid_conversion_by_signup_cohort
+    description: Share of each monthly signup cohort that has ever started a paid subscription
+    sql: |
+      SELECT DATE_TRUNC('month', u.signup_date)::date AS signup_month,
+             COUNT(*) AS users,
+             COUNT(*) FILTER (WHERE EXISTS (
+               SELECT 1 FROM subscriptions s
+               WHERE s.user_id = u.user_id AND s.plan IN ('monthly', 'annual')
+             )) AS ever_paid,
+             ROUND(COUNT(*) FILTER (WHERE EXISTS (
+               SELECT 1 FROM subscriptions s
+               WHERE s.user_id = u.user_id AND s.plan IN ('monthly', 'annual')
+             ))::numeric / COUNT(*), 4) AS paid_conversion_rate
+      FROM users u
+      GROUP BY 1
+      ORDER BY 1;

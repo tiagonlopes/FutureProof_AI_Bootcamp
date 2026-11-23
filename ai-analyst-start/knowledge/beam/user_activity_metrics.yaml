@@ -1,0 +1,105 @@
+table: user_activity_metrics
+schema: marts
+description: >
+  One row per calendar date with pre-computed active-user counts, built from
+  public.sessions. Use it for DAU, WAU, MAU and stickiness trends without
+  re-scanning sessions. WAU and MAU are rolling windows ending on the row's date
+  (7 and 30 days), not calendar weeks or months, so they will not match a
+  calendar-month count of active users from sessions. The counts are distinct
+  users and cannot be added up across days: to get distinct users for a whole
+  calendar month, a country or a device, go back to sessions.
+
+fields:
+  - name: date
+    type: date
+    description: Calendar date associated with the metric. Each row represents one day of activity, and each date appears once. Filter and group on this field.
+    role: dimension
+
+  - name: dau
+    type: integer
+    description: Daily Active Users, the number of distinct users who had at least one session on this exact date. Never sum it across days; average it to get typical daily activity.
+    role: measure
+
+  - name: wau
+    type: integer
+    description: Weekly Active Users, the number of distinct users who had at least one session within the 7-day period ending on this date. Used to measure medium-term engagement trends. Rolling window, so each row overlaps the previous six; never sum it.
+    role: measure
+
+  - name: mau
+    type: integer
+    description: Monthly Active Users, the number of distinct users who had at least one session within the 30-day period ending on this date. A core product metric used to track long-term engagement and calculate DAU/MAU stickiness ratios. Rolling 30 days, not the calendar month; to report MAU for a month, take the value on the month's last date.
+    role: measure
+
+measures:
+  - name: avg_dau
+    formula: AVG(dau) FILTER (WHERE date >= period_start AND date < period_end)
+    description: Average daily active users over the period.
+
+  - name: mau_at_period_end
+    formula: mau on the last date before period_end (see golden query monthly_engagement_summary)
+    description: MAU reported for a period, read from the last day of the period. Not an average and not a sum.
+
+  - name: stickiness
+    formula: AVG(dau::numeric / NULLIF(mau, 0)) FILTER (WHERE date >= period_start AND date < period_end)
+    description: Average DAU/MAU ratio over the period, the share of the monthly audience active on a typical day. Average the daily ratios; do not divide a summed DAU by a summed MAU.
+
+  - name: weekly_stickiness
+    formula: AVG(dau::numeric / NULLIF(wau, 0)) FILTER (WHERE date >= period_start AND date < period_end)
+    description: Average DAU/WAU ratio over the period.
+
+derived_dimensions:
+  - name: month
+    description: Calendar month of the date.
+    formula: DATE_TRUNC('month', date)::date
+
+  - name: day_of_week
+    description: Day of the week (Monday to Sunday), to compare weekday and weekend activity.
+    formula: TO_CHAR(date, 'FMDay')
+
+golden_queries:
+  - name: monthly_engagement_summary
+    description: Per calendar month, average DAU, MAU on the month's last available date, and average stickiness
+    sql: |
+      SELECT DATE_TRUNC('month', date)::date AS month,
+             ROUND(AVG(dau), 0) AS avg_dau,
+             (ARRAY_AGG(mau ORDER BY date DESC))[1] AS mau_month_end,
+             ROUND(AVG(dau::numeric / NULLIF(mau, 0)), 4) AS avg_stickiness
+      FROM marts.user_activity_metrics
+      GROUP BY 1
+      ORDER BY 1;
+
+  - name: daily_trend_last_90_days
+    description: Daily DAU, WAU, MAU and stickiness for the last 90 days
+    sql: |
+      SELECT date,
+             dau,
+             wau,
+             mau,
+             ROUND(dau::numeric / NULLIF(mau, 0), 4) AS dau_mau,
+             ROUND(dau::numeric / NULLIF(wau, 0), 4) AS dau_wau
+      FROM marts.user_activity_metrics
+      WHERE date >= CURRENT_DATE - INTERVAL '90 days'
+      ORDER BY date;
+
+  - name: weekday_vs_weekend_dau
+    description: Average DAU by day of week
+    sql: |
+      SELECT EXTRACT(ISODOW FROM date) AS dow_number,
+             TO_CHAR(date, 'FMDay') AS day_of_week,
+             ROUND(AVG(dau), 0) AS avg_dau
+      FROM marts.user_activity_metrics
+      GROUP BY 1, 2
+      ORDER BY 1;
+
+  - name: reconcile_dau_with_sessions
+    description: Check that the mart's DAU matches distinct users per day in public.sessions; any rows returned are mismatches
+    sql: |
+      SELECT m.date, m.dau, COALESCE(s.users, 0) AS dau_from_sessions
+      FROM marts.user_activity_metrics m
+      LEFT JOIN (
+        SELECT session_date::date AS date, COUNT(DISTINCT user_id) AS users
+        FROM public.sessions
+        GROUP BY 1
+      ) s ON s.date = m.date
+      WHERE m.dau <> COALESCE(s.users, 0)
+      ORDER BY m.date;

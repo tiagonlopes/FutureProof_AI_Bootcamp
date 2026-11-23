@@ -1,0 +1,25 @@
+dim,seg,post,sub_months,churned
+all,all,false,31873,770
+all,all,true,26821,1553
+country,EU,false,6300,148
+country,EU,true,5267,325
+country,India,false,6330,149
+country,India,true,5305,351
+country,Rest,false,6410,181
+country,Rest,true,5316,344
+country,US,false,12833,292
+country,US,true,10933,533
+device,Android,false,10702,249
+device,Android,true,9113,565
+device,iOS,false,11075,222
+device,iOS,true,9517,418
+device,Web,false,10096,299
+device,Web,true,8191,570
+tenure,12 to 24 months,false,7593,110
+tenure,12 to 24 months,true,6660,136
+tenure,6 to 12 months,false,5353,191
+tenure,6 to 12 months,true,6763,576
+tenure,over 24 months,false,7744,83
+tenure,over 24 months,true,8116,340
+tenure,under 6 months,false,11183,386
+tenure,under 6 months,true,5282,501

@@ -1,0 +1,132 @@
+table: user_revenue_summary
+schema: marts
+description: >
+  One row per user with lifetime payment totals, built from users, subscriptions
+  and payments. It is a frozen snapshot, not a live table: it holds only the
+  27,000 users who signed up on or before 2026-07-29 (users has 31,165) and its
+  last_payment_date stops at 2026-07-29, so everything after that is missing.
+  It also does not reconcile to payments (total_revenue_usd sums to 1,864,964
+  against 1,850,972 collected before 2026-07-30 in payments), so never use it
+  for a revenue figure that has to match finance. Use it for quick per-user
+  lifetime-value looks and go back to payments for revenue by month, plan or
+  method. 16,792 rows are users with no payments (all free users plus some
+  paid ones), so filter on total_payments > 0 before averaging revenue.
+
+fields:
+  - name: user_id
+    type: integer
+    description: The user. One row per user, so it is unique here, but the column carries no primary key constraint. Joins to users.user_id.
+    role: key
+
+  - name: country
+    type: text
+    description: The user's signup country, copied from users.country. Fixed at signup.
+    role: dimension
+
+  - name: signup_date
+    type: timestamp
+    description: Date and time of signup, copied from users.signup_date. Latest value is 2026-07-29, which is where the snapshot was cut.
+    role: dimension
+
+  - name: plan
+    type: text
+    description: The plan on the user's most recent subscription (matches subscriptions.plan for the latest start_date on every row). One of free, monthly or annual. It is the current plan, not the plan the revenue was paid on, so a user who moved from monthly to annual has all their revenue under annual.
+    role: dimension
+
+  - name: total_payments
+    type: integer
+    description: Number of payments the user has made in total. 0 for every free user and for some paid users who never paid. Never negative.
+    role: measure
+
+  - name: total_revenue_usd
+    type: numeric
+    description: Total cash collected from the user in USD over their lifetime, up to the snapshot cut. Never null; 0 when the user has no payments.
+    role: measure
+
+  - name: last_payment_date
+    type: timestamp
+    description: Date and time of the user's most recent payment. Null when total_payments is 0 (16,792 rows). Latest value is 2026-07-29.
+    role: dimension
+
+measures:
+  - name: total_users
+    formula: COUNT(DISTINCT user_id)
+    description: Users in the snapshot. Not all of Beam's users, only those who signed up by 2026-07-29.
+
+  - name: paying_users
+    formula: COUNT(DISTINCT user_id) FILTER (WHERE total_payments > 0)
+    description: Users with at least one payment.
+
+  - name: lifetime_revenue_usd
+    formula: SUM(total_revenue_usd)
+    description: Revenue collected from the snapshot's users over their lifetime. Approximate; see the description for why it does not match payments.
+
+  - name: arppu_usd
+    formula: SUM(total_revenue_usd) / NULLIF(COUNT(*) FILTER (WHERE total_payments > 0), 0)
+    description: Average lifetime revenue per paying user. Divide by paying users, not all users, or free users drag the average to near zero.
+
+  - name: avg_payments_per_paying_user
+    formula: AVG(total_payments) FILTER (WHERE total_payments > 0)
+    description: Average number of payments among users who paid at least once.
+
+derived_dimensions:
+  - name: signup_month
+    description: Calendar month of signup, the cohort key.
+    formula: DATE_TRUNC('month', signup_date)::date
+
+  - name: is_paying
+    description: Whether the user has ever paid.
+    formula: total_payments > 0
+
+golden_queries:
+  - name: lifetime_value_by_plan
+    description: Paying users, lifetime revenue and revenue per paying user by current plan
+    sql: |
+      SELECT plan,
+             COUNT(*) AS users,
+             COUNT(*) FILTER (WHERE total_payments > 0) AS paying_users,
+             SUM(total_revenue_usd) AS revenue_usd,
+             ROUND(SUM(total_revenue_usd) / NULLIF(COUNT(*) FILTER (WHERE total_payments > 0), 0), 2) AS arppu_usd
+      FROM marts.user_revenue_summary
+      GROUP BY 1
+      ORDER BY 1;
+
+  - name: lifetime_value_by_country
+    description: Paying users and lifetime revenue per paying user by signup country
+    sql: |
+      SELECT country,
+             COUNT(*) AS users,
+             COUNT(*) FILTER (WHERE total_payments > 0) AS paying_users,
+             SUM(total_revenue_usd) AS revenue_usd,
+             ROUND(SUM(total_revenue_usd) / NULLIF(COUNT(*) FILTER (WHERE total_payments > 0), 0), 2) AS arppu_usd
+      FROM marts.user_revenue_summary
+      GROUP BY 1
+      ORDER BY revenue_usd DESC;
+
+  - name: paying_share_by_signup_month
+    description: Share of each signup cohort that has paid at least once
+    sql: |
+      SELECT DATE_TRUNC('month', signup_date)::date AS signup_month,
+             COUNT(*) AS users,
+             COUNT(*) FILTER (WHERE total_payments > 0) AS paying_users,
+             ROUND(COUNT(*) FILTER (WHERE total_payments > 0)::numeric / COUNT(*), 4) AS paying_share
+      FROM marts.user_revenue_summary
+      GROUP BY 1
+      ORDER BY 1;
+
+  - name: reconcile_with_payments
+    description: Compare the mart's users, payments and revenue with the same users in public.payments. Expect a gap today; the mart is a frozen snapshot
+    sql: |
+      SELECT 'mart' AS source,
+             COUNT(*) AS users,
+             SUM(total_payments) AS payments,
+             SUM(total_revenue_usd) AS revenue_usd
+      FROM marts.user_revenue_summary
+      UNION ALL
+      SELECT 'payments, same users',
+             COUNT(DISTINCT s.user_id),
+             COUNT(*),
+             SUM(p.amount_usd)
+      FROM public.payments p
+      JOIN public.subscriptions s ON s.subscription_id = p.subscription_id
+      WHERE s.user_id IN (SELECT user_id FROM marts.user_revenue_summary);

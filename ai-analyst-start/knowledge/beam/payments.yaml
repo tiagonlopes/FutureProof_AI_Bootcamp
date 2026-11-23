@@ -1,0 +1,102 @@
+table: payments
+description: >
+  One row per payment collected on a subscription. This is the only source of
+  revenue. payments has no user_id: to reach the user, join through subscriptions
+  (payments.subscription_id = subscriptions.subscription_id, then
+  subscriptions.user_id = users.user_id). Revenue is cash collected on
+  payment_date, so an annual payment counts in full in the month it was paid.
+
+fields:
+  - name: payment_id
+    type: integer
+    description: Unique identifier for the payment. Primary key.
+    role: key
+
+  - name: subscription_id
+    type: integer
+    description: The subscription the payment was made for. Joins to subscriptions.subscription_id, which is also the only path to the user and the plan.
+    role: key
+
+  - name: payment_date
+    type: timestamp
+    description: Date when the payment was made. This is the field that places revenue in a period.
+    role: dimension
+
+  - name: amount_usd
+    type: numeric
+    description: The payment amount in USD. Already in USD, so no currency conversion is needed. Sum it for revenue.
+    role: measure
+
+  - name: method
+    type: text
+    description: The payment method used. One of card or paypal.
+    role: dimension
+
+measures:
+  - name: revenue_usd
+    formula: SUM(amount_usd) FILTER (WHERE payment_date >= period_start AND payment_date < period_end)
+    description: Cash collected in the period, in USD.
+
+  - name: payment_count
+    formula: COUNT(payment_id) FILTER (WHERE payment_date >= period_start AND payment_date < period_end)
+    description: Payments made in the period.
+
+  - name: paying_users
+    formula: COUNT(DISTINCT subscriptions.user_id) FILTER (WHERE payment_date >= period_start AND payment_date < period_end)
+    description: Distinct users with at least one payment in the period. Needs the join to subscriptions.
+
+  - name: arppu_usd
+    formula: revenue_usd / NULLIF(paying_users, 0)
+    description: Average revenue per paying user in the period.
+
+derived_dimensions:
+  - name: payment_month
+    description: Calendar month of the payment.
+    formula: DATE_TRUNC('month', payment_date)::date
+
+  - name: monthly_equivalent_usd
+    description: >
+      Payment spread to a monthly amount, for MRR-style views. Annual payments are
+      divided by 12; monthly payments are kept as is. Needs the join to
+      subscriptions for plan.
+    formula: |
+      CASE WHEN subscriptions.plan = 'annual' THEN amount_usd / 12 ELSE amount_usd END
+
+golden_queries:
+  - name: monthly_revenue_by_plan
+    description: Cash revenue per month, split by subscription plan
+    sql: |
+      SELECT DATE_TRUNC('month', p.payment_date)::date AS month,
+             s.plan,
+             COUNT(*) AS payments,
+             SUM(p.amount_usd) AS revenue_usd
+      FROM payments p
+      JOIN subscriptions s ON s.subscription_id = p.subscription_id
+      GROUP BY 1, 2
+      ORDER BY 1, 2;
+
+  - name: monthly_revenue_by_country
+    description: Cash revenue and paying users per month by signup country
+    sql: |
+      SELECT DATE_TRUNC('month', p.payment_date)::date AS month,
+             u.country,
+             COUNT(DISTINCT s.user_id) AS paying_users,
+             SUM(p.amount_usd) AS revenue_usd,
+             ROUND(SUM(p.amount_usd) / COUNT(DISTINCT s.user_id), 2) AS arppu_usd
+      FROM payments p
+      JOIN subscriptions s ON s.subscription_id = p.subscription_id
+      JOIN users u ON u.user_id = s.user_id
+      GROUP BY 1, 2
+      ORDER BY 1, revenue_usd DESC;
+
+  - name: revenue_by_payment_method
+    description: Share of each month's revenue by payment method
+    sql: |
+      SELECT DATE_TRUNC('month', payment_date)::date AS month,
+             method,
+             SUM(amount_usd) AS revenue_usd,
+             ROUND(SUM(amount_usd)
+                   / SUM(SUM(amount_usd)) OVER (PARTITION BY DATE_TRUNC('month', payment_date)), 4) AS share_of_revenue
+      FROM payments
+      GROUP BY 1, 2
+      ORDER BY 1, 2;

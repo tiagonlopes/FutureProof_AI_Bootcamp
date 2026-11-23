@@ -1,0 +1,124 @@
+table: trials
+description: >
+  One row per free trial started by a user. A trial has a planned end (ends_at)
+  and, once resolved, an outcome and the time it was recorded (outcome_at). There
+  is no key to subscriptions; a conversion is linked to a subscription by user_id
+  and timing. The database has no column comments for this table, so these
+  descriptions are inferred from the column names and data types and still need
+  confirming with the data owner.
+
+fields:
+  - name: trial_id
+    type: integer
+    description: Unique identifier for the trial. Primary key.
+    role: key
+
+  - name: user_id
+    type: integer
+    description: The user who started the trial. Joins to users.user_id. A user may have more than one trial.
+    role: key
+
+  - name: started_at
+    type: timestamp
+    description: Date and time the trial started. This is the field that places a trial in a period and the cohort key for conversion rates.
+    role: dimension
+
+  - name: ends_at
+    type: timestamp
+    description: Date and time the trial is scheduled to end. Always filled, so it is the planned end, not proof the trial has finished. Use outcome to know whether it resolved.
+    role: dimension
+
+  - name: outcome
+    type: text
+    description: >
+      Result of the trial. Empty means the trial has no outcome yet and is still
+      open. The set of values is not documented; run SELECT outcome, COUNT(*)
+      FROM trials GROUP BY 1 and replace 'converted' in the measures and queries
+      below with the real converted label.
+    role: dimension
+
+  - name: outcome_at
+    type: timestamp
+    description: Date and time the outcome was recorded. Empty when outcome is empty. Can be before ends_at when the user converted or cancelled early.
+    role: dimension
+
+measures:
+  - name: trials_started
+    formula: COUNT(trial_id) FILTER (WHERE started_at >= period_start AND started_at < period_end)
+    description: Trials started in the period.
+
+  - name: open_trials
+    formula: COUNT(trial_id) FILTER (WHERE started_at <= analysis_date AND (outcome IS NULL OR outcome_at > analysis_date))
+    description: Trials with no outcome yet on the analysis date.
+
+  - name: converted_trials
+    formula: COUNT(trial_id) FILTER (WHERE outcome = 'converted' AND started_at >= period_start AND started_at < period_end)
+    description: Trials started in the period that converted to paid.
+
+  - name: trial_conversion_rate
+    formula: converted_trials / NULLIF(COUNT(trial_id) FILTER (WHERE outcome IS NOT NULL AND started_at >= period_start AND started_at < period_end), 0)
+    description: >
+      Share of resolved trials started in the period that converted. Open trials
+      are left out of the denominator so recent cohorts are not understated.
+
+derived_dimensions:
+  - name: trial_start_month
+    description: Calendar month the trial started. The cohort key for conversion analyses.
+    formula: DATE_TRUNC('month', started_at)::date
+
+  - name: trial_length_days
+    description: Planned trial length in days.
+    formula: ends_at::date - started_at::date
+
+  - name: days_to_outcome
+    description: Days from trial start to the recorded outcome. Empty for open trials.
+    formula: outcome_at::date - started_at::date
+
+golden_queries:
+  - name: monthly_trial_conversion
+    description: Trials started each month, how many resolved, and the conversion rate among resolved trials
+    sql: |
+      SELECT DATE_TRUNC('month', started_at)::date AS trial_start_month,
+             COUNT(*) AS trials_started,
+             COUNT(*) FILTER (WHERE outcome IS NOT NULL) AS resolved,
+             COUNT(*) FILTER (WHERE outcome = 'converted') AS converted,
+             ROUND(COUNT(*) FILTER (WHERE outcome = 'converted')::numeric
+                   / NULLIF(COUNT(*) FILTER (WHERE outcome IS NOT NULL), 0), 4) AS conversion_rate
+      FROM trials
+      GROUP BY 1
+      ORDER BY 1;
+
+  - name: trial_conversion_by_device
+    description: Trial conversion rate by signup device, resolved trials only
+    sql: |
+      SELECT u.device_type,
+             COUNT(*) AS resolved_trials,
+             COUNT(*) FILTER (WHERE t.outcome = 'converted') AS converted,
+             ROUND(COUNT(*) FILTER (WHERE t.outcome = 'converted')::numeric / COUNT(*), 4) AS conversion_rate
+      FROM trials t
+      JOIN users u ON u.user_id = t.user_id
+      WHERE t.outcome IS NOT NULL
+      GROUP BY 1
+      ORDER BY 1;
+
+  - name: trial_to_first_paid_subscription
+    description: Links each trial to the user's first paid subscription starting on or after the trial start, to check conversions against subscriptions
+    sql: |
+      SELECT t.trial_id,
+             t.user_id,
+             t.started_at,
+             t.outcome,
+             s.subscription_id,
+             s.plan,
+             s.start_date AS paid_start_date
+      FROM trials t
+      LEFT JOIN LATERAL (
+        SELECT subscription_id, plan, start_date
+        FROM subscriptions
+        WHERE user_id = t.user_id
+          AND plan IN ('monthly', 'annual')
+          AND start_date >= t.started_at
+        ORDER BY start_date
+        LIMIT 1
+      ) s ON TRUE
+      ORDER BY t.started_at;

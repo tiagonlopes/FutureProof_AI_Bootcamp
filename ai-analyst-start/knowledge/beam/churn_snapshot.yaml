@@ -1,0 +1,172 @@
+table: churn_snapshot
+schema: ml
+description: >
+  Machine-learning training table for churn. One row per user with an active
+  paid subscription (monthly or annual, never free) on the snapshot date, with
+  features computed from activity on or before that date and a label,
+  churned_within_90d, saying whether the subscription ended in the following
+  90 days. It is versioned by snapshot_date and append-only: existing snapshots
+  are never changed and a new one is added as a new snapshot_date. Today there
+  is a single snapshot, 2026-04-30 (7,690 users). To read the newest snapshot
+  use ml.churn_snapshot_latest, a view that filters to the maximum snapshot_date.
+  Always filter or group on snapshot_date before counting users, or users from
+  different snapshots get mixed. Labels are fully observed for the 2026-04-30
+  snapshot because its 90-day window closed on 2026-07-29, before the data end.
+  Source: fpds-dataset/ml_churn_snapshot.sql.
+
+fields:
+  - name: user_id
+    type: integer
+    description: The paying user. Part of the primary key (user_id, snapshot_date). Joins to users.user_id.
+    role: key
+
+  - name: snapshot_date
+    type: date
+    description: The date the features are measured on. Part of the primary key. Currently 2026-04-30 only.
+    role: key
+
+  - name: plan
+    type: text
+    description: The user's paid plan on the snapshot date. One of monthly or annual; free users are never in this table.
+    role: dimension
+
+  - name: country
+    type: text
+    description: The user's signup country, copied from users.country. Four distinct values.
+    role: dimension
+
+  - name: device_type
+    type: text
+    description: The user's signup device, copied from users.device_type. One of iOS, Android or Web.
+    role: dimension
+
+  - name: tenure_days
+    type: integer
+    description: Whole days between signup and the snapshot date. Ranges from 6 to 1,580.
+    role: measure
+
+  - name: subscription_age_days
+    type: integer
+    description: Whole days since the current paid subscription started, as of the snapshot date. Never larger than tenure_days. Ranges from 1 to 1,569.
+    role: measure
+
+  - name: sessions_last_30d
+    type: integer
+    description: Sessions in the 30 days up to and including the snapshot date. Ranges from 0 to 31.
+    role: measure
+
+  - name: sessions_last_90d
+    type: integer
+    description: Sessions in the 90 days up to and including the snapshot date. Always at least sessions_last_30d.
+    role: measure
+
+  - name: avg_session_minutes_90d
+    type: numeric
+    description: Average session length in minutes over the last 90 days. 0, not null, for the 16 users with no sessions in the window, so it understates the average if you do not exclude them.
+    role: measure
+
+  - name: listen_share_90d
+    type: numeric
+    description: Share of the last 90 days' sessions whose activity_type is listen, from 0 to 1.
+    role: measure
+
+  - name: days_since_last_session
+    type: integer
+    description: Whole days between the snapshot date and the user's last session. Ranges from 0 to 365. The value 365 is a fill for users with no session at all (16 rows, exactly those with sessions_last_90d = 0), not a real gap, so exclude or flag it before averaging.
+    role: measure
+
+  - name: total_payments
+    type: integer
+    description: Number of payments the user had made by the snapshot date.
+    role: measure
+
+  - name: last_payment_amount
+    type: numeric
+    description: Amount in USD of the user's latest payment by the snapshot date. Ranges from 0 to 100; the monthly price changed in March 2026 (see quirks.md), so compare monthly amounts with care.
+    role: measure
+
+  - name: churned_within_90d
+    type: integer
+    description: The label. 1 if the subscription ended within the 90 days after snapshot_date, otherwise 0. Never use it as a feature.
+    role: measure
+
+measures:
+  - name: users
+    formula: COUNT(DISTINCT user_id) FILTER (WHERE snapshot_date = :snapshot_date)
+    description: Paying users in one snapshot. Always pin a snapshot_date.
+
+  - name: churn_rate_90d
+    formula: AVG(churned_within_90d::numeric) FILTER (WHERE snapshot_date = :snapshot_date)
+    description: Share of the snapshot's paying users whose subscription ended within 90 days. About 0.114 overall for 2026-04-30, but very different by plan (about 0.01 annual, 0.11 to 0.19 monthly depending on device), so report it by plan.
+
+  - name: churned_users
+    formula: SUM(churned_within_90d) FILTER (WHERE snapshot_date = :snapshot_date)
+    description: Users who churned within 90 days of the snapshot.
+
+derived_dimensions:
+  - name: recency_bucket
+    description: Bucket for days since the last session, to see how churn rises as users go quiet.
+    formula: |
+      CASE WHEN days_since_last_session <= 7 THEN '0-7'
+           WHEN days_since_last_session <= 30 THEN '8-30'
+           WHEN days_since_last_session <= 90 THEN '31-90'
+           ELSE '91+' END
+
+  - name: tenure_bucket
+    description: Bucket for how long the user has been on Beam.
+    formula: |
+      CASE WHEN tenure_days < 90 THEN '<3m'
+           WHEN tenure_days < 365 THEN '3-12m'
+           ELSE '12m+' END
+
+golden_queries:
+  - name: churn_rate_by_plan_and_device
+    description: Users and 90-day churn rate by plan and signup device in the latest snapshot
+    sql: |
+      SELECT plan,
+             device_type,
+             COUNT(*) AS users,
+             SUM(churned_within_90d) AS churned,
+             ROUND(AVG(churned_within_90d::numeric), 4) AS churn_rate
+      FROM ml.churn_snapshot_latest
+      GROUP BY 1, 2
+      ORDER BY 1, 2;
+
+  - name: churn_rate_by_recency
+    description: Churn rate by days since last session, monthly plan only, latest snapshot
+    sql: |
+      SELECT CASE WHEN days_since_last_session <= 7 THEN '0-7'
+                  WHEN days_since_last_session <= 30 THEN '8-30'
+                  WHEN days_since_last_session <= 90 THEN '31-90'
+                  ELSE '91+' END AS recency_bucket,
+             COUNT(*) AS users,
+             ROUND(AVG(churned_within_90d::numeric), 4) AS churn_rate
+      FROM ml.churn_snapshot_latest
+      WHERE plan = 'monthly'
+      GROUP BY 1
+      ORDER BY MIN(days_since_last_session);
+
+  - name: churn_rate_by_tenure
+    description: Churn rate by tenure bucket and plan, latest snapshot
+    sql: |
+      SELECT plan,
+             CASE WHEN tenure_days < 90 THEN '<3m'
+                  WHEN tenure_days < 365 THEN '3-12m'
+                  ELSE '12m+' END AS tenure_bucket,
+             COUNT(*) AS users,
+             ROUND(AVG(churned_within_90d::numeric), 4) AS churn_rate
+      FROM ml.churn_snapshot_latest
+      GROUP BY 1, 2
+      ORDER BY 1, MIN(tenure_days);
+
+  - name: label_check_against_subscriptions
+    description: Check the label against the subscriptions table. Lists users flagged as churned whose subscription has no end_date between the snapshot date and 90 days after it (a subscription ending on the snapshot date itself counts as churned); any rows are mismatches to investigate. Returns no rows today
+    sql: |
+      SELECT c.user_id, c.snapshot_date, s.end_date
+      FROM ml.churn_snapshot c
+      JOIN public.subscriptions s ON s.user_id = c.user_id AND s.plan = c.plan
+      WHERE c.churned_within_90d = 1
+        AND (s.end_date IS NULL
+             OR s.end_date::date < c.snapshot_date
+             OR s.end_date::date > c.snapshot_date + 90)
+      ORDER BY c.user_id;

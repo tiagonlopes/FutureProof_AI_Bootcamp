@@ -1,0 +1,146 @@
+table: trial_snapshot
+schema: ml
+description: >
+  Machine-learning training table for trial-to-paid conversion. One row per
+  trial that had fully matured by the snapshot date, with base counts from the
+  trial's first 3 days and a label, converted. It is versioned by snapshot_date
+  and append-only: existing snapshots are never changed. Today there is a single
+  snapshot, 2026-09-24 (1,516 trials, started 2026-08-01 to 2026-09-09). Trials
+  started after 2026-09-09 are not in it because they had not matured by the
+  snapshot date (see the trials-mature-late quirk in quirks.md), so this table
+  is not a count of all trials and must not be used for volumes. To read the
+  newest snapshot use ml.trial_snapshot_latest, a view that filters to the
+  maximum snapshot_date. The columns are raw aggregates; ratios and flags are
+  left for the consumer to derive. Source: fpds-dataset/ml_trial_snapshot.sql.
+
+fields:
+  - name: trial_id
+    type: integer
+    description: Unique identifier of the trial. Part of the primary key (trial_id, snapshot_date). Joins to trials.trial_id.
+    role: key
+
+  - name: user_id
+    type: integer
+    description: The user who took the trial. Joins to users.user_id.
+    role: key
+
+  - name: snapshot_date
+    type: date
+    description: The date the snapshot was built. Part of the primary key. Currently 2026-09-24 only.
+    role: key
+
+  - name: trial_started_at
+    type: date
+    description: Date the trial started. A date, not a timestamp. Use it to build weekly or monthly trial cohorts.
+    role: dimension
+
+  - name: country
+    type: text
+    description: The user's signup country, copied from users.country. Four distinct values.
+    role: dimension
+
+  - name: device_type
+    type: text
+    description: The user's signup device, copied from users.device_type. One of iOS, Android or Web.
+    role: dimension
+
+  - name: sessions_day1
+    type: integer
+    description: Sessions on the first day of the trial. Ranges from 0 to 37.
+    role: measure
+
+  - name: sessions_day2
+    type: integer
+    description: Sessions on the second day of the trial. Ranges from 0 to 16.
+    role: measure
+
+  - name: sessions_day3
+    type: integer
+    description: Sessions on the third day of the trial. Ranges from 0 to 23.
+    role: measure
+
+  - name: listen_sessions_3d
+    type: integer
+    description: Sessions with activity_type listen across the first 3 days. At most the sum of the three daily session counts.
+    role: measure
+
+  - name: total_minutes_3d
+    type: integer
+    description: Total minutes spent across all sessions in the first 3 days. 0 for the 38 trials with no activity at all.
+    role: measure
+
+  - name: converted
+    type: integer
+    description: The label. 1 if the trial auto-converted to a paid plan at trial end, 0 if the user canceled during the trial. Every row has a value because only matured trials are included. Never use it as a feature.
+    role: measure
+
+measures:
+  - name: matured_trials
+    formula: COUNT(DISTINCT trial_id) FILTER (WHERE snapshot_date = :snapshot_date)
+    description: Matured trials in one snapshot. Always pin a snapshot_date.
+
+  - name: conversion_rate
+    formula: AVG(converted::numeric) FILTER (WHERE snapshot_date = :snapshot_date)
+    description: Share of matured trials that converted to paid. About 0.53 overall for the 2026-09-24 snapshot.
+
+  - name: avg_sessions_3d
+    formula: AVG(sessions_day1 + sessions_day2 + sessions_day3)
+    description: Average sessions across the first 3 days of the trial.
+
+derived_dimensions:
+  - name: sessions_3d
+    description: Total sessions across the first 3 days.
+    formula: sessions_day1 + sessions_day2 + sessions_day3
+
+  - name: active_day1
+    description: Whether the user had at least one session on day 1 of the trial.
+    formula: sessions_day1 > 0
+
+  - name: listen_share_3d
+    description: Share of the first 3 days' sessions that were listening. Null when there were no sessions.
+    formula: listen_sessions_3d::numeric / NULLIF(sessions_day1 + sessions_day2 + sessions_day3, 0)
+
+  - name: trial_start_week
+    description: Week the trial started, the cohort key.
+    formula: DATE_TRUNC('week', trial_started_at)::date
+
+golden_queries:
+  - name: conversion_by_device
+    description: Matured trials and conversion rate by signup device in the latest snapshot
+    sql: |
+      SELECT device_type,
+             COUNT(*) AS trials,
+             SUM(converted) AS converted,
+             ROUND(AVG(converted::numeric), 4) AS conversion_rate
+      FROM ml.trial_snapshot_latest
+      GROUP BY 1
+      ORDER BY 1;
+
+  - name: conversion_by_day1_activity
+    description: Conversion rate for trials with and without a session on day 1
+    sql: |
+      SELECT sessions_day1 > 0 AS active_day1,
+             COUNT(*) AS trials,
+             ROUND(AVG(converted::numeric), 4) AS conversion_rate
+      FROM ml.trial_snapshot_latest
+      GROUP BY 1
+      ORDER BY 1;
+
+  - name: conversion_by_start_week
+    description: Matured trials and conversion rate by the week the trial started
+    sql: |
+      SELECT DATE_TRUNC('week', trial_started_at)::date AS trial_start_week,
+             COUNT(*) AS trials,
+             ROUND(AVG(converted::numeric), 4) AS conversion_rate
+      FROM ml.trial_snapshot_latest
+      GROUP BY 1
+      ORDER BY 1;
+
+  - name: label_check_against_trials
+    description: Compare the snapshot's converted label with the outcome in public.trials; any rows are mismatches to investigate
+    sql: |
+      SELECT ts.trial_id, ts.converted, t.outcome
+      FROM ml.trial_snapshot_latest ts
+      JOIN public.trials t ON t.trial_id = ts.trial_id
+      WHERE ts.converted <> CASE WHEN t.outcome = 'converted' THEN 1 ELSE 0 END
+      ORDER BY ts.trial_id;
